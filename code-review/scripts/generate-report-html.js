@@ -36,15 +36,33 @@ HTML 报告生成器 - 将审查结果转换为 HTML 报告
 const params = {};
 for (let i = 0; i < args.length; i++) {
     if (args[i].startsWith('--')) {
-        const key = args[i].slice(2);
-        const value = args[i + 1] && !args[i + 1].startsWith('--') ? args[i + 1] : true;
-        params[key] = value;
-        if (value !== true) i++;
+        // 支持 --key=value 格式
+        if (args[i].includes('=')) {
+            const [key, ...valueParts] = args[i].slice(2).split('=');
+            params[key] = valueParts.join('=');
+        } else {
+            // 支持 --key value 格式
+            const key = args[i].slice(2);
+            const value = args[i + 1] && !args[i + 1].startsWith('--') ? args[i + 1] : true;
+            params[key] = value;
+            if (value !== true) i++;
+        }
     }
 }
 
-const inputFile = params.input || path.join(process.cwd(), 'ai-review-result.txt');
-const outputFile = params.output || path.join(process.cwd(), 'review-report.html');
+// 获取脚本所在目录
+const scriptDir = __dirname;
+const skillRootDir = path.resolve(scriptDir, '..');
+
+// 输入文件路径：优先使用绝对路径，否则在 Skill 根目录下查找
+const inputFile = params.input 
+    ? (path.isAbsolute(params.input) ? params.input : path.join(process.cwd(), params.input))
+    : path.join(skillRootDir, 'ai-review-result.txt');
+
+// 输出文件路径：优先使用绝对路径，否则在当前工作目录输出
+const outputFile = params.output
+    ? (path.isAbsolute(params.output) ? params.output : path.join(process.cwd(), params.output))
+    : path.join(process.cwd(), 'review-report.html');
 
 console.log(`[INFO] 生成 HTML 报告...`);
 console.log(`[INFO] 输入文件: ${inputFile}`);
@@ -76,12 +94,30 @@ function parseLineFormat(content) {
             continue;
         }
 
+        // 跳过无效行：字段不足7个，或包含占位符（type/title/location等示例值）
         if (parts.length >= 7) {
+            const type = parts[0];
+            const title = parts[2];
+            const location = parts[3];
+            
+            // 跳过占位符行（示例行）
+            if (type === 'type' || title === 'title' || location === 'location' ||
+                type === 'TYPE' || title === 'TITLE' || location === 'LOCATION') {
+                console.log(`[WARN] 跳过占位符行: ${line.substring(0, 50)}...`);
+                continue;
+            }
+            
+            // 跳过表头行
+            if (type.toLowerCase().includes('type') && title.toLowerCase().includes('title')) {
+                console.log(`[WARN] 跳过表头行: ${line.substring(0, 50)}...`);
+                continue;
+            }
+            
             issues.push({
-                type: parts[0],
+                type: type,
                 severity: severityMap[parts[1]] || parts[1],
-                title: parts[2],
-                location: parts[3],
+                title: title,
+                location: location,
                 description: parts[4],
                 code: parts[5],
                 fix: parts[6],
@@ -1503,7 +1539,7 @@ function generateHTMLReport(data) {
                 </div>
                 <div class="meta-card">
                     <div class="meta-label">Files Analyzed</div>
-                    <div class="meta-value">${summary.filesReviewed || 0}</div>
+                    <div class="meta-value">${metadata.filesReviewed || 0}</div>
                 </div>
                 <div class="meta-card">
                     <div class="meta-label">Total Lines</div>
@@ -1561,13 +1597,13 @@ function generateHTMLReport(data) {
                         <span class="flow-analysis-title">${escapeHtml(issue.title || 'Process Issue')}</span>
                     </div>
                     <div class="flow-analysis-location">${escapeHtml(issue.location || 'Unknown Location')}</div>
-                    <div class="flow-analysis-desc">${escapeHtml(issue.description || '')}</div>
+                    <div class="flow-analysis-desc">${formatMultiline(escapeHtml(issue.description || ''))}</div>
                     <div class="flow-analysis-diagram">
                         <div class="mermaid" id="flow-summary-${idx}">
 ${issue.flowchart}
                         </div>
                     </div>
-                    ${issue.fix ? `<div class="flow-analysis-fix">💡 ${escapeHtml(issue.fix)}</div>` : ''}
+                    ${issue.fix ? `<div class="flow-analysis-fix">💡 ${formatMultiline(escapeHtml(issue.fix))}</div>` : ''}
                 </div>
                 `).join('')}
             </div>
@@ -1610,8 +1646,8 @@ ${issue.flowchart}
                 <div class="issue-content">
                     <div class="issue-body">
                         ${issue.location ? `<div class="issue-location">${escapeHtml(issue.location)}</div>` : ''}
-                        <p class="issue-description">${escapeHtml(issue.description || '')}</p>
-                        ${issue.flowchart ? `
+                        <p class="issue-description">${formatMultiline(escapeHtml(issue.description || ''))}</p>
+                        ${issue.flowchart && issue.flowchart.trim() && issue.flowchart.trim() !== 'flowchart' ? `
                         <div class="flowchart-container">
                             <div class="flowchart-header">
                                 <span class="flowchart-icon">◇</span>
@@ -1625,7 +1661,7 @@ ${issue.flowchart}
                         ${issue.fix ? `
                         <div class="issue-fix">
                             <div class="issue-fix-label">Suggested Fix</div>
-                            ${escapeHtml(issue.fix)}
+                            ${formatMultiline(escapeHtml(issue.fix))}
                         </div>
                         ` : ''}
                         ${issue.code ? `
@@ -1870,6 +1906,10 @@ function escapeHtml(text) {
 }
 
 function syntaxHighlight(code) {
+    // 先处理换行符，将 \n 转换为占位符，避免被其他正则影响
+    const lineBreakPlaceholder = '__LINEBREAK__';
+    let result = code.replace(/\\n/g, lineBreakPlaceholder);
+    
     // 使用占位符方式避免嵌套替换问题
     const placeholders = [];
     let placeholderIndex = 0;
@@ -1891,8 +1931,6 @@ function syntaxHighlight(code) {
         }
         return result;
     }
-
-    let result = code;
 
     // 1. 先处理注释（不能被其他规则影响）
     result = result.replace(/(\/\/.*$)/gm, (match) => {
@@ -1916,7 +1954,9 @@ function syntaxHighlight(code) {
         'new', 'try', 'catch', 'throw', 'throws', 'extends', 'implements',
         'synchronized', 'volatile', 'transient', 'abstract', 'native', 'this',
         'super', 'null', 'true', 'false', 'instanceof', 'switch', 'case',
-        'default', 'break', 'continue', 'finally', 'do', 'enum', 'assert'
+        'default', 'break', 'continue', 'finally', 'do', 'enum', 'assert',
+        'const', 'let', 'var', 'function', 'async', 'await', 'yield',
+        'typeof', 'in', 'of', 'delete', 'with', 'debugger'
     ];
 
     const keywordPattern = new RegExp(`\\b(${keywords.join('|')})\\b`, 'g');
@@ -1924,13 +1964,32 @@ function syntaxHighlight(code) {
         return createPlaceholder(`<span class="code-keyword">${match}</span>`);
     });
 
-    // 5. 处理类型关键字
+    // 5. 处理类型关键字（Java 常用类）
     const types = [
-        'String', 'int', 'boolean', 'long', 'double', 'float', 'char', 'byte',
-        'short', 'Object', 'List', 'Map', 'Set', 'BigDecimal', 'LocalDateTime',
-        'Integer', 'Long', 'Double', 'Float', 'Boolean', 'Byte', 'Short',
-        'Character', 'Void', 'Exception', 'RuntimeException', 'Date', 'Optional',
-        'ArrayList', 'HashMap', 'HashSet', 'LinkedList', 'TreeMap', 'TreeSet'
+        // 基础类型
+        'String', 'int', 'boolean', 'long', 'double', 'float', 'char', 'byte', 'short',
+        // 包装类型
+        'Integer', 'Long', 'Double', 'Float', 'Boolean', 'Byte', 'Short', 'Character', 'Void',
+        // 集合类型
+        'Object', 'List', 'Map', 'Set', 'Collection', 'Iterable', 'Iterator',
+        'ArrayList', 'HashMap', 'HashSet', 'LinkedList', 'TreeMap', 'TreeSet',
+        'LinkedHashMap', 'LinkedHashSet', 'ConcurrentHashMap', 'CopyOnWriteArrayList',
+        // 工具类
+        'Optional', 'Stream', 'Arrays', 'Collections', 'Objects', 'Comparator',
+        // 时间类
+        'Date', 'LocalDate', 'LocalTime', 'LocalDateTime', 'Instant', 'Duration',
+        'BigDecimal', 'BigInteger',
+        // 异常类
+        'Exception', 'RuntimeException', 'IllegalArgumentException', 'NullPointerException',
+        'IllegalStateException', 'IndexOutOfBoundsException', 'ConcurrentModificationException',
+        // IO 类
+        'File', 'InputStream', 'OutputStream', 'Reader', 'Writer', 'BufferedReader',
+        // 线程类
+        'Thread', 'Runnable', 'Callable', 'Future', 'CompletableFuture', 'ExecutorService',
+        // Spring 常用类
+        'Autowired', 'Service', 'Component', 'Repository', 'Controller', 'RestController',
+        'RequestMapping', 'GetMapping', 'PostMapping', 'PutMapping', 'DeleteMapping',
+        'RequestParam', 'PathVariable', 'RequestBody', 'ResponseBody'
     ];
 
     const typePattern = new RegExp(`\\b(${types.join('|')})\\b`, 'g');
@@ -1954,7 +2013,20 @@ function syntaxHighlight(code) {
     });
 
     // 恢复所有占位符
-    return restorePlaceholders(result);
+    result = restorePlaceholders(result);
+    
+    // 最后将换行符占位符转换为 <br> 标签
+    result = result.replace(new RegExp(lineBreakPlaceholder, 'g'), '<br>');
+    
+    return result;
+}
+
+/**
+ * 处理文本中的换行符，将 \n 转换为 <br>
+ */
+function formatMultiline(text) {
+    if (!text) return '';
+    return text.replace(/\\n/g, '<br>').replace(/\n/g, '<br>');
 }
 
 function formatDate(dateStr) {
